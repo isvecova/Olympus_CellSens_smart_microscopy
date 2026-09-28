@@ -2,6 +2,10 @@
 
 This repository helps detect ROIs from low-magnification Olympus .vsi overview images and convert them into tilescan positions for subsequent high-magnification acquisition. It reads .vsi overview or z-stack files, segments objects using a swappable detection method, plans point targets or tile-scan regions in microscope stage coordinates and writes CellSens Stage Navigator XML that can be loaded back into CellSens.
 
+![CellSens stage navigator window](./images/CellSens_stage_navigator.png)
+
+![Napari-based filtering GUI](./images/filtering_GUI.png)
+
 The XML schema has been reverse-engineered from testing overview area XML files - can be saved and loaded through Stage Navigator. The schema has been tested for Olympus CellSens 4.1.1 - if you want to use it for other version, be sure to first test it and confirm that it works. 
 
 The XML file has to be stored in the CellSens internal folder to be detected by the software. The path to the corresponding folder is the following: 
