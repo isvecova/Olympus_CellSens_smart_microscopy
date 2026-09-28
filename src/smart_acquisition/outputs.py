@@ -13,6 +13,8 @@ from smart_acquisition.targeting.coordinate_transform import AffinePixelToStage
 
 
 def write_mask(path: str | Path, mask: np.ndarray) -> None:
+    """Write a binary detection mask as an 8-bit TIFF."""
+
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     import tifffile
@@ -21,6 +23,8 @@ def write_mask(path: str | Path, mask: np.ndarray) -> None:
 
 
 def write_labels_if_requested(path: str | Path | None, labels: np.ndarray | None) -> None:
+    """Write raw detector labels when the detector provides them."""
+
     if path is None or labels is None:
         return
     path = Path(path)
@@ -34,6 +38,8 @@ def write_probability_if_requested(
     path: str | Path | None,
     positive_probability: np.ndarray | None,
 ) -> None:
+    """Write a float positive-class probability image when available."""
+
     if path is None or positive_probability is None:
         return
     path = Path(path)
@@ -48,6 +54,8 @@ def write_measurements_csv(
     measurements: tuple[ComponentMeasurement, ...],
     positions: list[StagePosition],
 ) -> None:
+    """Write detected component measurements and centroid stage positions."""
+
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8") as handle:
@@ -94,6 +102,8 @@ def write_measurements_csv(
 
 
 def write_stage_positions_csv(path: str | Path, positions: list[StagePosition]) -> None:
+    """Write planned point targets as a simple stage-position CSV."""
+
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8") as handle:
@@ -114,6 +124,8 @@ def write_rectangular_regions_csv(
     path: str | Path,
     regions: list[RectangularRegion],
 ) -> None:
+    """Write planned rectangular tile-scan regions for QC and inspection."""
+
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8") as handle:
@@ -135,6 +147,8 @@ def write_rectangular_regions_csv(
 
 
 def write_polygon_regions_csv(path: str | Path, regions: list[PolygonRegion]) -> None:
+    """Write planned polygon mosaic bounds and vertex counts for QC."""
+
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8") as handle:
@@ -175,6 +189,8 @@ def write_region_confidences_csv(
     rectangular_regions: list[RectangularRegion],
     polygon_regions: list[PolygonRegion],
 ) -> None:
+    """Write confidence summaries for planned rectangle and polygon ROIs."""
+
     if positive_probability is None:
         return
 
@@ -234,6 +250,8 @@ def _region_confidence_row(
     detection_mask: np.ndarray,
     positive_probability: np.ndarray,
 ) -> list[str | int | float | None]:
+    """Summarize detector probability support inside one planned ROI."""
+
     roi_area_px = int(np.count_nonzero(roi_mask))
     support_mask = roi_mask & detection_mask & np.isfinite(positive_probability)
     detected_area_px = int(np.count_nonzero(support_mask))
@@ -275,6 +293,8 @@ def _rectangular_region_mask(
     region: RectangularRegion,
     transform: AffinePixelToStage,
 ) -> np.ndarray:
+    """Rasterize a rectangular stage ROI into image pixels."""
+
     half_width = region.width_um / 2.0
     half_height = region.height_um / 2.0
     vertices = [
@@ -291,6 +311,8 @@ def _polygon_region_mask(
     region: PolygonRegion,
     transform: AffinePixelToStage,
 ) -> np.ndarray:
+    """Rasterize a polygon stage ROI into image pixels."""
+
     return _vertices_mask(shape, region.vertices_xy_um, transform)
 
 
@@ -299,6 +321,8 @@ def _vertices_mask(
     vertices_xy_um: list[tuple[float, float]],
     transform: AffinePixelToStage,
 ) -> np.ndarray:
+    """Rasterize stage-space vertices into a boolean image mask."""
+
     from skimage.draw import polygon
 
     vertices_px = [
@@ -310,4 +334,3 @@ def _vertices_mask(
     mask = np.zeros(shape, dtype=bool)
     mask[rr, cc] = True
     return mask
-

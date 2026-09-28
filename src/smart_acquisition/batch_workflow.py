@@ -18,6 +18,7 @@ from smart_acquisition.detection.adapters import (
 )
 from smart_acquisition.detection.base import DetectionResult
 from smart_acquisition.models import AcquisitionTile
+from smart_acquisition.planning_modes import DEFAULT_PLANNING_MODE
 from smart_acquisition.targeting.coordinate_transform import AffinePixelToStage
 from smart_acquisition.workflow import (
     ProcessedTargetPlan,
@@ -36,7 +37,7 @@ class BatchWorkflowConfig:
 
     model_path: Path
     output_dir: Path
-    planning_mode: str = "optimized_z_aware_irregular_mosaics"
+    planning_mode: str = DEFAULT_PLANNING_MODE
     scene: int | str | None = 0
     channel: int = 0
     time: int = 0
@@ -76,9 +77,10 @@ class BatchWorkflowConfig:
     max_extra_tile_fraction: float = 0.10
     coverage_margin_um: float = 0.0
     polygon_simplify_tolerance_um: float = 10.0
-    estimate_tile_scan_z: bool = True
-    write_tile_scan_z_histograms: bool = True
+    polygon_boundary_mode: str = "alpha_shape"
+    alpha_radius_tile_fraction: float = 0.75
     z_estimation_labels: tuple[int, ...] = (1, 2)
+    timing_logs_enabled: bool = True
 
 
 def process_zstack_to_target_plan(
@@ -155,6 +157,8 @@ def plan_targets_from_detection(
 
 
 def _workflow_config_from_batch_config(config: BatchWorkflowConfig) -> WorkflowConfig:
+    """Translate the older RF-specific config into the generic workflow config."""
+
     return WorkflowConfig(
         output_dir=config.output_dir,
         input=VsiInputConfig(
@@ -188,6 +192,7 @@ def _workflow_config_from_batch_config(config: BatchWorkflowConfig) -> WorkflowC
                 overlap_fraction=config.target_tile_overlap_fraction,
             ),
         ),
+        timing_logs_enabled=config.timing_logs_enabled,
     )
 
 
@@ -196,6 +201,8 @@ def _planning_config_from_batch_config(
     *,
     target_tile: AcquisitionTile,
 ) -> TargetPlanningConfig:
+    """Translate batch GUI planning fields into the shared planning config."""
+
     return TargetPlanningConfig(
         planning_mode=config.planning_mode,
         target_tile=target_tile,
@@ -204,8 +211,7 @@ def _planning_config_from_batch_config(
         max_extra_tile_fraction=config.max_extra_tile_fraction,
         coverage_margin_um=config.coverage_margin_um,
         polygon_simplify_tolerance_um=config.polygon_simplify_tolerance_um,
-        estimate_tile_scan_z=config.estimate_tile_scan_z,
-        write_tile_scan_z_histograms=config.write_tile_scan_z_histograms,
+        polygon_boundary_mode=config.polygon_boundary_mode,
+        alpha_radius_tile_fraction=config.alpha_radius_tile_fraction,
         z_estimation_labels=config.z_estimation_labels,
     )
-

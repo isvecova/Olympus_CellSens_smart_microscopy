@@ -69,6 +69,8 @@ def resample_to_pixel_size(
 def _normalize_pixel_size(
     target_pixel_size_um: float | tuple[float, float],
 ) -> tuple[float, float]:
+    """Normalize scalar or Y/X pixel-size input to a `(y_um, x_um)` tuple."""
+
     if isinstance(target_pixel_size_um, tuple):
         if len(target_pixel_size_um) != 2:
             raise ValueError("target pixel size tuple must be (y_um, x_um)")

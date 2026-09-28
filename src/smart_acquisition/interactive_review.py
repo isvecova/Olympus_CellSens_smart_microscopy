@@ -1,9 +1,15 @@
-"""Interactive selection helpers for napari detection review."""
+"""Interactive selection helpers for napari detection review.
+
+Detector GUIs call this module to turn the current filtered mask into preview
+geometry, and to run the slower compact object-count selection only when the
+user explicitly requests it.
+"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from math import ceil
+from time import perf_counter
 
 import numpy as np
 
@@ -17,16 +23,10 @@ from smart_acquisition.models import (
     RectangularRegion,
     StagePosition,
 )
+from smart_acquisition.planning_modes import get_planning_strategy
 from smart_acquisition.targeting.coordinate_transform import AffinePixelToStage
 from smart_acquisition.targeting.polygon_regions import (
-    plan_mixed_positions_and_polygon_regions_from_mask,
-    plan_optimized_z_aware_positions_and_polygon_regions_from_mask,
-    plan_z_aware_positions_and_polygon_regions_from_mask,
-    plan_z_aware_tile_positions_from_mask,
-)
-from smart_acquisition.targeting.tile_planner import (
-    plan_mixed_positions_and_tilescans,
-    plan_positions_for_high_mag_tiles,
+    plan_composed_targets_from_mask,
 )
 
 
@@ -46,7 +46,10 @@ class ReviewPlanningOptions:
     z_estimation_labels: tuple[int, ...] = (1, 2)
     max_group_z_difference_um: float = 10.0
     max_extra_tile_fraction: float = 0.25
+    polygon_boundary_mode: str = "alpha_shape"
+    alpha_radius_tile_fraction: float = 0.75
     name_prefix: str = "Planned"
+    timing_logs_enabled: bool = True
 
 
 @dataclass(frozen=True)
@@ -72,124 +75,67 @@ def plan_review_targets(
     if not measurements:
         return ReviewPlan([], [], [], 0, 0)
 
-    positions = _positions_from_measurements(
-        measurements,
+    strategy = get_planning_strategy(options.planning_mode)
+    start = perf_counter()
+    composed_plan = plan_composed_targets_from_mask(
+        mask,
+        classifier_labels=classifier_labels,
+        argmax_z=(
+            _require_argmax_z(options)
+            if strategy.estimates_z_during_planning
+            else None
+        ),
+        z_positions_um=(
+            _require_z_positions(options)
+            if strategy.estimates_z_during_planning
+            else None
+        ),
         transform=options.transform,
-        z_um=options.z_um,
-        name_prefix=options.name_prefix,
-    )
-
-    if options.planning_mode == "mixed_tilescans":
-        mixed_plan = plan_mixed_positions_and_tilescans(
-            positions,
-            tile=options.tile,
-            merge_distance_factor=options.merge_distance_factor,
-            coverage_margin_um=options.coverage_margin_um,
-            name_prefix=options.name_prefix,
-        )
-        return _make_review_plan(
-            mixed_plan.point_positions,
-            mixed_plan.rectangular_regions,
-            [],
-            len(mixed_plan.groups),
-            options.tile,
-        )
-
-    if options.planning_mode == "mixed_irregular_mosaics":
-        polygon_plan = plan_mixed_positions_and_polygon_regions_from_mask(
-            mask,
-            transform=options.transform,
-            z_um=options.z_um,
-            tile=options.tile,
-            min_area_px=1,
-            merge_distance_factor=options.merge_distance_factor,
-            simplify_tolerance_um=options.polygon_simplify_tolerance_um,
-            name_prefix=options.name_prefix,
-        )
-        return _make_review_plan(
-            polygon_plan.point_positions,
-            [],
-            polygon_plan.polygon_regions,
-            len(polygon_plan.point_positions) + len(polygon_plan.polygon_regions),
-            options.tile,
-        )
-
-    if options.planning_mode == "z_aware_irregular_mosaics":
-        z_plan = plan_z_aware_positions_and_polygon_regions_from_mask(
-            mask,
-            classifier_labels=classifier_labels,
-            argmax_z=_require_argmax_z(options),
-            z_positions_um=_require_z_positions(options),
-            transform=options.transform,
-            fallback_z_um=options.z_um,
-            tile=options.tile,
-            include_labels=options.z_estimation_labels,
-            min_area_px=1,
-            merge_distance_factor=options.merge_distance_factor,
-            max_group_z_difference_um=options.max_group_z_difference_um,
-            simplify_tolerance_um=options.polygon_simplify_tolerance_um,
-            name_prefix=options.name_prefix,
-        )
-        return _make_review_plan(
-            z_plan.point_positions,
-            [],
-            z_plan.polygon_regions,
-            len(z_plan.groups),
-            options.tile,
-        )
-
-    if options.planning_mode == "optimized_z_aware_irregular_mosaics":
-        z_plan = plan_optimized_z_aware_positions_and_polygon_regions_from_mask(
-            mask,
-            classifier_labels=classifier_labels,
-            argmax_z=_require_argmax_z(options),
-            z_positions_um=_require_z_positions(options),
-            transform=options.transform,
-            fallback_z_um=options.z_um,
-            tile=options.tile,
-            include_labels=options.z_estimation_labels,
-            min_area_px=1,
-            merge_distance_factor=options.merge_distance_factor,
-            max_group_z_difference_um=options.max_group_z_difference_um,
-            max_extra_tile_fraction=options.max_extra_tile_fraction,
-            simplify_tolerance_um=options.polygon_simplify_tolerance_um,
-            name_prefix=options.name_prefix,
-        )
-        return _make_review_plan(
-            z_plan.point_positions,
-            [],
-            z_plan.polygon_regions,
-            len(z_plan.groups),
-            options.tile,
-        )
-
-    if options.planning_mode == "z_aware_tiles":
-        z_plan = plan_z_aware_tile_positions_from_mask(
-            mask,
-            classifier_labels=classifier_labels,
-            argmax_z=_require_argmax_z(options),
-            z_positions_um=_require_z_positions(options),
-            transform=options.transform,
-            fallback_z_um=options.z_um,
-            tile=options.tile,
-            include_labels=options.z_estimation_labels,
-            min_area_px=1,
-            merge_distance_factor=options.merge_distance_factor,
-            max_group_z_difference_um=options.max_group_z_difference_um,
-            coverage_margin_um=options.coverage_margin_um,
-            name_prefix=options.name_prefix,
-        )
-        return _make_review_plan(z_plan.point_positions, [], [], len(z_plan.groups), options.tile)
-
-    planned_positions, groups = plan_positions_for_high_mag_tiles(
-        positions,
+        fallback_z_um=options.z_um,
         tile=options.tile,
-        mode=options.planning_mode,
+        output_choice=strategy.output_choice,
+        grouping_choice=strategy.grouping_choice,
+        z_choice=strategy.z_choice,
+        optimization_choice=strategy.optimization_choice,
+        include_labels=options.z_estimation_labels,
+        min_area_px=1,
         merge_distance_factor=options.merge_distance_factor,
+        max_group_z_difference_um=options.max_group_z_difference_um,
+        max_extra_tile_fraction=options.max_extra_tile_fraction,
         coverage_margin_um=options.coverage_margin_um,
+        simplify_tolerance_um=options.polygon_simplify_tolerance_um,
+        polygon_boundary_mode=options.polygon_boundary_mode,
+        alpha_radius_tile_fraction=options.alpha_radius_tile_fraction,
         name_prefix=options.name_prefix,
+        estimate_final_roi_z=False,
+        estimate_group_tile_counts=False,
+        timing_logs_enabled=options.timing_logs_enabled,
     )
-    return _make_review_plan(planned_positions, [], [], len(groups), options.tile)
+    _log_review_timing(
+        "plan_composed_targets_from_mask",
+        start,
+        options=options,
+        extra=(
+            f"{len(measurements)} objects, "
+            f"{len(composed_plan.rectangular_regions)} rectangles, "
+            f"{len(composed_plan.polygon_regions)} polygons"
+        ),
+    )
+    start = perf_counter()
+    review_plan = _make_review_plan(
+        composed_plan.point_positions,
+        composed_plan.rectangular_regions,
+        composed_plan.polygon_regions,
+        len(composed_plan.groups),
+        options.tile,
+    )
+    _log_review_timing(
+        "review tile-count summary",
+        start,
+        options=options,
+        extra=f"{review_plan.tile_count} tiles",
+    )
+    return review_plan
 
 
 def select_measurements_minimizing_tiles(
@@ -212,6 +158,7 @@ def select_measurements_minimizing_tiles(
     if requested_count <= 0 or len(measurements) <= requested_count:
         return measurements
 
+    total_start = perf_counter()
     candidates = tuple(measurements)
     scores = {
         measurement.label: _finite_score(measurement.size_weighted_confidence)
@@ -226,6 +173,7 @@ def select_measurements_minimizing_tiles(
     best_selection: tuple[ComponentMeasurement, ...] | None = None
     best_key: tuple[int, float, float] | None = None
     for seed in seed_measurements:
+        seed_start = perf_counter()
         selected = _grow_compact_selection(
             seed,
             candidates,
@@ -247,9 +195,31 @@ def select_measurements_minimizing_tiles(
         if best_key is None or key < best_key:
             best_key = key
             best_selection = selected
+        _log_review_timing(
+            "optimize-count seed",
+            seed_start,
+            options=options,
+            extra=f"seed label {seed.label}, {plan.tile_count} tiles",
+        )
 
     if best_selection is None:
+        _log_review_timing(
+            "optimize-count total",
+            total_start,
+            options=options,
+            extra="no best selection",
+        )
         return tuple(candidates[:requested_count])
+    _log_review_timing(
+        "optimize-count total",
+        total_start,
+        options=options,
+        extra=(
+            f"{len(seed_measurements)} seeds, best key {best_key}"
+            if best_key is not None
+            else f"{len(seed_measurements)} seeds"
+        ),
+    )
     return best_selection
 
 
@@ -262,16 +232,20 @@ def build_napari_tiling_preview(
 ) -> NapariTilingPreview:
     """Create napari shape geometry for the current interactive plan."""
 
+    total_start = perf_counter()
+    start = perf_counter()
     plan = plan_review_targets(
         mask,
         measurements,
         classifier_labels=classifier_labels,
         options=options,
     )
+    _log_review_timing("preview planning", start, options=options)
     tile_shapes: list[np.ndarray] = []
     region_shapes: list[np.ndarray] = []
     point_centers: list[tuple[float, float]] = []
 
+    start = perf_counter()
     for position in plan.point_positions:
         tile_shapes.append(
             _stage_vertices_to_yx(
@@ -282,7 +256,14 @@ def build_napari_tiling_preview(
         point_centers.append(
             _stage_point_to_yx(position.x_um, position.y_um, options.transform)
         )
+    _log_review_timing(
+        "preview point shapes",
+        start,
+        options=options,
+        extra=f"{len(plan.point_positions)} point targets",
+    )
 
+    start = perf_counter()
     for region in plan.rectangular_regions:
         region_vertices = _rectangular_region_vertices(region)
         region_shapes.append(_stage_vertices_to_yx(region_vertices, options.transform))
@@ -293,7 +274,14 @@ def build_napari_tiling_preview(
                     options.transform,
                 )
             )
+    _log_review_timing(
+        "preview rectangle shapes",
+        start,
+        options=options,
+        extra=f"{len(plan.rectangular_regions)} rectangles",
+    )
 
+    start = perf_counter()
     for region in plan.polygon_regions:
         region_shapes.append(
             _stage_vertices_to_yx(region.vertices_xy_um, options.transform)
@@ -305,8 +293,14 @@ def build_napari_tiling_preview(
                     options.transform,
                 )
             )
+    _log_review_timing(
+        "preview polygon shapes",
+        start,
+        options=options,
+        extra=f"{len(plan.polygon_regions)} polygons",
+    )
 
-    return NapariTilingPreview(
+    preview = NapariTilingPreview(
         tile_rectangles_yx=tuple(tile_shapes),
         region_outlines_yx=tuple(region_shapes),
         point_centers_yx=tuple(point_centers),
@@ -318,6 +312,16 @@ def build_napari_tiling_preview(
         ),
         group_count=plan.group_count,
     )
+    _log_review_timing(
+        "build_napari_tiling_preview total",
+        total_start,
+        options=options,
+        extra=(
+            f"{preview.tile_count} tiles, {preview.target_count} targets, "
+            f"{preview.group_count} groups"
+        ),
+    )
+    return preview
 
 
 def _make_review_plan(
@@ -327,6 +331,8 @@ def _make_review_plan(
     group_count: int,
     tile: AcquisitionTile,
 ) -> ReviewPlan:
+    """Build a compact review summary from composed planner outputs."""
+
     tile_count = (
         len(point_positions)
         + sum(len(_tile_centers_for_rectangle(region, tile)) for region in rectangular_regions)
@@ -348,6 +354,8 @@ def _positions_from_measurements(
     z_um: float,
     name_prefix: str,
 ) -> list[StagePosition]:
+    """Convert reviewed measurement centroids into stage point targets."""
+
     positions: list[StagePosition] = []
     for index, measurement in enumerate(measurements, start=1):
         x_um, y_um = transform.apply(
@@ -373,6 +381,8 @@ def _grow_compact_selection(
     scores: dict[int, float],
     options: ReviewPlanningOptions,
 ) -> tuple[ComponentMeasurement, ...]:
+    """Grow a seed object into a compact high-confidence selection."""
+
     selected = [seed]
     remaining = [candidate for candidate in candidates if candidate.label != seed.label]
     while len(selected) < requested_count and remaining:
@@ -391,6 +401,8 @@ def _normalized_distance_to_selection(
     selected: list[ComponentMeasurement],
     options: ReviewPlanningOptions,
 ) -> float:
+    """Return tile-normalized distance from a candidate to the selection."""
+
     candidate_x, candidate_y = _measurement_stage_xy(candidate, options.transform)
     selected_xy = [
         _measurement_stage_xy(measurement, options.transform) for measurement in selected
@@ -408,6 +420,8 @@ def _measurement_stage_xy(
     measurement: ComponentMeasurement,
     transform: AffinePixelToStage,
 ) -> tuple[float, float]:
+    """Return a measurement centroid in stage micrometres."""
+
     return transform.apply(
         x_px=measurement.centroid_x_px,
         y_px=measurement.centroid_y_px,
@@ -415,16 +429,22 @@ def _measurement_stage_xy(
 
 
 def _finite_score(value: float) -> float:
+    """Convert NaN confidence scores to zero for ranking."""
+
     return float(value) if np.isfinite(value) else 0.0
 
 
 def _require_argmax_z(options: ReviewPlanningOptions) -> np.ndarray:
+    """Return argmax-Z data or raise a planning-specific error."""
+
     if options.argmax_z is None:
         raise ValueError("Z-aware napari preview requires argmax-Z data")
     return options.argmax_z
 
 
 def _require_z_positions(options: ReviewPlanningOptions) -> tuple[float, ...]:
+    """Return Z plane positions or raise a planning-specific error."""
+
     if options.z_positions_um is None:
         raise ValueError("Z-aware napari preview requires z-position metadata")
     return options.z_positions_um
@@ -434,6 +454,8 @@ def _tile_centers_for_rectangle(
     region: RectangularRegion,
     tile: AcquisitionTile,
 ) -> list[tuple[float, float]]:
+    """Return high-mag tile centers implied by a rectangular CellSens ROI."""
+
     count_x = _tile_count_for_span(region.width_um, tile.width_um, tile.step_x_um)
     count_y = _tile_count_for_span(region.height_um, tile.height_um, tile.step_y_um)
     span_x = max(0.0, (count_x - 1) * tile.step_x_um)
@@ -451,6 +473,8 @@ def _tile_centers_for_polygon(
     region: PolygonRegion,
     tile: AcquisitionTile,
 ) -> list[tuple[float, float]]:
+    """Return tile centers whose footprints intersect a polygon ROI."""
+
     vertices = np.asarray(region.vertices_xy_um, dtype=float)
     if vertices.ndim != 2 or vertices.shape[0] < 3 or vertices.shape[1] != 2:
         return []
@@ -486,6 +510,8 @@ def _tile_footprint_intersects_polygon(
     tile: AcquisitionTile,
     vertices: np.ndarray,
 ) -> bool:
+    """Return whether a rectangular tile footprint intersects a polygon."""
+
     center_x, center_y = center_xy_um
     left = center_x - tile.width_um / 2.0
     right = center_x + tile.width_um / 2.0
@@ -508,6 +534,8 @@ def _tile_footprint_intersects_polygon(
 
 
 def _points_in_polygon(points: np.ndarray, vertices: np.ndarray) -> np.ndarray:
+    """Return point-in-polygon results using a ray-casting test."""
+
     x = points[:, 0]
     y = points[:, 1]
     polygon_x = vertices[:, 0]
@@ -533,12 +561,16 @@ def _point_in_rectangle(
     bottom: float,
     top: float,
 ) -> bool:
+    """Return whether a point lies inside a closed rectangle."""
+
     eps = 1e-9
     x, y = point
     return left - eps <= x <= right + eps and bottom - eps <= y <= top + eps
 
 
 def _polygon_edges(vertices: np.ndarray):
+    """Yield consecutive polygon edges, including the closing edge."""
+
     for index in range(len(vertices)):
         yield vertices[index], vertices[(index + 1) % len(vertices)]
 
@@ -549,6 +581,8 @@ def _segments_intersect(
     b_start: np.ndarray,
     b_end: np.ndarray,
 ) -> bool:
+    """Return whether two line segments intersect."""
+
     o1 = _orientation(a_start, a_end, b_start)
     o2 = _orientation(a_start, a_end, b_end)
     o3 = _orientation(b_start, b_end, a_start)
@@ -565,6 +599,8 @@ def _segments_intersect(
 
 
 def _orientation(a: np.ndarray, b: np.ndarray, c: np.ndarray) -> int:
+    """Return orientation sign for three points."""
+
     value = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
     if abs(value) <= 1e-9:
         return 0
@@ -576,6 +612,8 @@ def _point_on_segment(
     segment_start: np.ndarray,
     segment_end: np.ndarray,
 ) -> bool:
+    """Return whether a point lies on a line segment."""
+
     eps = 1e-9
     return (
         min(segment_start[0], segment_end[0]) - eps
@@ -588,11 +626,15 @@ def _point_on_segment(
 
 
 def _tile_count_for_span(span_um: float, tile_size_um: float, step_um: float) -> int:
+    """Return how many overlapping tiles cover one stage-space span."""
+
     remaining_after_first_tile = max(0.0, span_um - tile_size_um)
     return 1 + ceil(remaining_after_first_tile / step_um)
 
 
 def _rectangular_region_vertices(region: RectangularRegion) -> list[tuple[float, float]]:
+    """Return stage-space vertices for a rectangular CellSens ROI."""
+
     half_width = region.width_um / 2.0
     half_height = region.height_um / 2.0
     return [
@@ -608,6 +650,8 @@ def _tile_vertices(
     center_y_um: float,
     tile: AcquisitionTile,
 ) -> list[tuple[float, float]]:
+    """Return stage-space vertices for one high-mag tile footprint."""
+
     half_width = tile.width_um / 2.0
     half_height = tile.height_um / 2.0
     return [
@@ -622,6 +666,8 @@ def _stage_vertices_to_yx(
     vertices_xy_um: list[tuple[float, float]],
     transform: AffinePixelToStage,
 ) -> np.ndarray:
+    """Convert stage-space X/Y vertices into napari Y/X coordinates."""
+
     return np.asarray(
         [_stage_point_to_yx(x_um, y_um, transform) for x_um, y_um in vertices_xy_um],
         dtype=np.float32,
@@ -633,5 +679,23 @@ def _stage_point_to_yx(
     y_um: float,
     transform: AffinePixelToStage,
 ) -> tuple[float, float]:
+    """Convert one stage-space X/Y point into napari Y/X coordinates."""
+
     x_px, y_px = transform.apply_inverse(x_um=x_um, y_um=y_um)
     return float(y_px), float(x_px)
+
+
+def _log_review_timing(
+    label: str,
+    start: float,
+    *,
+    options: ReviewPlanningOptions,
+    extra: str | None = None,
+) -> None:
+    """Print interactive-review timing when enabled."""
+
+    if not options.timing_logs_enabled:
+        return
+    elapsed_s = perf_counter() - start
+    suffix = f" ({extra})" if extra else ""
+    print(f"[timing] napari preview: {label}: {elapsed_s:.3f} s{suffix}")

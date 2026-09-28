@@ -14,6 +14,8 @@ from smart_acquisition.models import AcquisitionTile
 
 @dataclass(frozen=True)
 class PointTarget:
+    """Point target parsed from CellSens Stage Navigator XML."""
+
     x_um: float
     y_um: float
     z_um: float
@@ -22,6 +24,8 @@ class PointTarget:
 
 @dataclass(frozen=True)
 class RectangularTarget:
+    """Rectangular tile-scan target parsed from CellSens XML."""
+
     center_x_um: float
     center_y_um: float
     z_um: float
@@ -32,6 +36,8 @@ class RectangularTarget:
 
 @dataclass(frozen=True)
 class PolygonTarget:
+    """Polygon mosaic target parsed from CellSens XML."""
+
     vertices_xy_um: list[tuple[float, float]]
     z_um: float
     name: str
@@ -39,6 +45,8 @@ class PolygonTarget:
 
 @dataclass(frozen=True)
 class CellSensTargets:
+    """All target types extracted from one CellSens XML file."""
+
     points: list[PointTarget]
     rectangles: list[RectangularTarget]
     polygons: list[PolygonTarget]
@@ -84,6 +92,8 @@ def visualize_cellsens_tiles(
 
 
 def _read_cellsens_targets(path: Path) -> CellSensTargets:
+    """Parse point, rectangle, polygon, and overview-bound data from XML."""
+
     root = ET.parse(path).getroot()
     stage_navigator = _find_stage_navigator(root)
 
@@ -149,6 +159,8 @@ def _plot_targets(
     show_labels: bool,
     dpi: int,
 ) -> None:
+    """Render parsed targets and implied high-mag tile footprints."""
+
     import matplotlib.pyplot as plt
     from matplotlib.patches import Polygon as PolygonPatch
     from matplotlib.patches import Rectangle
@@ -264,6 +276,8 @@ def _draw_background(
     background: Path,
     overview_bounds: tuple[float, float, float, float] | None,
 ) -> None:
+    """Draw an optional overview image behind stage-space target geometry."""
+
     if background.suffix.lower() in (".tif", ".tiff"):
         try:
             import tifffile
@@ -297,6 +311,8 @@ def _draw_background(
 
 
 def _estimated_total_tiles(targets: CellSensTargets, tile: AcquisitionTile) -> int:
+    """Return the approximate number of high-mag tiles implied by all targets."""
+
     return (
         len(targets.points)
         + sum(
@@ -319,6 +335,8 @@ def _draw_tile_rectangles(
     facecolor: str,
     label: str,
 ) -> None:
+    """Draw one rectangle for each high-mag tile center."""
+
     from matplotlib.patches import Rectangle
 
     for x_um, y_um, _z_um, _name in tile_centers:
@@ -339,6 +357,8 @@ def _tile_centers_for_rectangle(
     rectangle: RectangularTarget,
     tile: AcquisitionTile,
 ) -> list[tuple[float, float]]:
+    """Return tile centers implied by a rectangular CellSens target."""
+
     count_x = _tile_count_for_span(rectangle.width_um, tile.width_um, tile.step_x_um)
     count_y = _tile_count_for_span(rectangle.height_um, tile.height_um, tile.step_y_um)
     span_x = max(0.0, (count_x - 1) * tile.step_x_um)
@@ -356,6 +376,8 @@ def _tile_centers_for_polygon(
     polygon: PolygonTarget,
     tile: AcquisitionTile,
 ) -> list[tuple[float, float]]:
+    """Return tile centers whose footprints intersect a polygon target."""
+
     vertices = np.asarray(polygon.vertices_xy_um, dtype=float)
     if vertices.ndim != 2 or vertices.shape[0] < 3 or vertices.shape[1] != 2:
         return []
@@ -398,6 +420,8 @@ def _tile_footprint_intersects_polygon(
     tile: AcquisitionTile,
     vertices: np.ndarray,
 ) -> bool:
+    """Return whether a tile footprint intersects a polygon target."""
+
     center_x, center_y = center_xy_um
     left = center_x - tile.width_um / 2.0
     right = center_x + tile.width_um / 2.0
@@ -434,12 +458,16 @@ def _point_in_rectangle(
     bottom: float,
     top: float,
 ) -> bool:
+    """Return whether a point lies inside a rectangle."""
+
     eps = 1e-9
     x, y = point
     return left - eps <= x <= right + eps and bottom - eps <= y <= top + eps
 
 
 def _polygon_edges(vertices: np.ndarray):
+    """Yield consecutive polygon edges, including the closing edge."""
+
     for index in range(len(vertices)):
         yield vertices[index], vertices[(index + 1) % len(vertices)]
 
@@ -450,6 +478,8 @@ def _segments_intersect(
     b_start: np.ndarray,
     b_end: np.ndarray,
 ) -> bool:
+    """Return whether two line segments intersect."""
+
     o1 = _orientation(a_start, a_end, b_start)
     o2 = _orientation(a_start, a_end, b_end)
     o3 = _orientation(b_start, b_end, a_start)
@@ -472,6 +502,8 @@ def _orientation(
     b: np.ndarray,
     c: np.ndarray,
 ) -> int:
+    """Return orientation sign for three points."""
+
     value = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
     if abs(value) <= 1e-9:
         return 0
@@ -483,6 +515,8 @@ def _point_on_segment(
     segment_start: np.ndarray,
     segment_end: np.ndarray,
 ) -> bool:
+    """Return whether a point lies on a line segment."""
+
     eps = 1e-9
     return (
         min(segment_start[0], segment_end[0]) - eps
@@ -495,6 +529,8 @@ def _point_on_segment(
 
 
 def _points_in_polygon(points: np.ndarray, vertices: np.ndarray) -> np.ndarray:
+    """Return point-in-polygon results using a ray-casting test."""
+
     x = points[:, 0]
     y = points[:, 1]
     polygon_x = vertices[:, 0]
@@ -514,6 +550,8 @@ def _points_in_polygon(points: np.ndarray, vertices: np.ndarray) -> np.ndarray:
 
 
 def _tile_count_for_span(span_um: float, tile_size_um: float, step_um: float) -> int:
+    """Return how many overlapping tiles cover one stage-space span."""
+
     remaining_after_first_tile = max(0.0, span_um - tile_size_um)
     return 1 + int(np.ceil(remaining_after_first_tile / step_um))
 
@@ -523,6 +561,8 @@ def _autoscale_axes(
     targets: CellSensTargets,
     tile: AcquisitionTile,
 ) -> None:
+    """Scale axes to include overview bounds, targets, and tile footprints."""
+
     xs: list[float] = []
     ys: list[float] = []
 
@@ -556,6 +596,8 @@ def _autoscale_axes(
 
 
 def _deduplicate_legend(ax: plt.Axes) -> None:
+    """Collapse repeated tile labels in the matplotlib legend."""
+
     handles, labels = ax.get_legend_handles_labels()
     unique: dict[str, object] = {}
     for handle, label in zip(handles, labels):
@@ -565,6 +607,8 @@ def _deduplicate_legend(ax: plt.Axes) -> None:
 
 
 def _find_stage_navigator(root: ET.Element) -> ET.Element:
+    """Find the Stage Navigator property set in a CellSens XML tree."""
+
     for property_set in root.iter("PropertySet"):
         if property_set.attrib.get("Key") == schema.STAGE_NAVIGATOR_KEY:
             return property_set
@@ -572,6 +616,8 @@ def _find_stage_navigator(root: ET.Element) -> ET.Element:
 
 
 def _find_property(parent: ET.Element, property_id: str) -> ET.Element | None:
+    """Find a direct CellSens Property child by schema ID."""
+
     for prop in parent.findall("Property"):
         if prop.attrib.get("ID") == property_id:
             return prop
@@ -582,6 +628,8 @@ def _read_vec3_array(
     stage_navigator: ET.Element,
     property_id: str,
 ) -> list[tuple[float, float, float]]:
+    """Read a CellSens array of CdVec3 values."""
+
     prop = _find_property(stage_navigator, property_id)
     if prop is None:
         return []
@@ -601,6 +649,8 @@ def _read_vec2_array(
     stage_navigator: ET.Element,
     property_id: str,
 ) -> list[tuple[float, float]]:
+    """Read a CellSens array of CdVec2 values."""
+
     prop = _find_property(stage_navigator, property_id)
     if prop is None:
         return []
@@ -619,6 +669,8 @@ def _read_vec2_array(
 def _read_polygon_vertices(
     stage_navigator: ET.Element,
 ) -> list[list[tuple[float, float]]]:
+    """Read polygon vertex arrays from CellSens polygon region entries."""
+
     prop = _find_property(stage_navigator, schema.POLYGON_REGIONS)
     if prop is None:
         return []
@@ -645,6 +697,8 @@ def _read_polygon_vertices(
 
 
 def _read_polygon_z_values(stage_navigator: ET.Element) -> list[float]:
+    """Read one Z value per CellSens polygon region."""
+
     prop = _find_property(stage_navigator, schema.POLYGON_REGIONS)
     if prop is None:
         return []
@@ -664,6 +718,8 @@ def _read_polygon_z_values(stage_navigator: ET.Element) -> list[float]:
 
 
 def _read_metadata_names(stage_navigator: ET.Element, property_id: str) -> list[str]:
+    """Read target display names from a CellSens metadata array."""
+
     prop = _find_property(stage_navigator, property_id)
     if prop is None:
         return []
@@ -678,6 +734,8 @@ def _read_metadata_names(stage_navigator: ET.Element, property_id: str) -> list[
 
 
 def _name_at(names: list[str], index: int, fallback_prefix: str) -> str:
+    """Return a parsed target name or a stable fallback name."""
+
     if index <= len(names) and names[index - 1]:
         return names[index - 1]
     return f"{fallback_prefix} {index}"
@@ -686,6 +744,8 @@ def _name_at(names: list[str], index: int, fallback_prefix: str) -> str:
 def _read_overview_bounds(
     stage_navigator: ET.Element,
 ) -> tuple[float, float, float, float] | None:
+    """Read the overview image stage bounds from XML when present."""
+
     prop = _find_property(stage_navigator, schema.OVERVIEW_BOUNDS)
     if prop is None:
         return None
@@ -700,6 +760,7 @@ def _read_overview_bounds(
 
 
 def _polygon_centroid(vertices_xy_um: list[tuple[float, float]]) -> tuple[float, float]:
+    """Return a simple arithmetic centroid for label placement."""
+
     vertices = np.asarray(vertices_xy_um, dtype=float)
     return float(np.mean(vertices[:, 0])), float(np.mean(vertices[:, 1]))
-

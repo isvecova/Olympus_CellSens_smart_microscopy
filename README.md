@@ -1,8 +1,13 @@
 # Olympus CellSens smart microscopy position detection
 
-This repository helps detect ROIs from low-magnification Olympus .vsi overview images and convert them into tilescan positions for subsequent high-magnification acquisition. It reads VSI overview or z-stack files, segments objects using a swappable detection method, plans point targets or tile-scan regions in microscope stage coordinates and writes CellSens Stage Navigator XML that can be loaded back into CellSens.
+This repository helps detect ROIs from low-magnification Olympus .vsi overview images and convert them into tilescan positions for subsequent high-magnification acquisition. It reads .vsi overview or z-stack files, segments objects using a swappable detection method, plans point targets or tile-scan regions in microscope stage coordinates and writes CellSens Stage Navigator XML that can be loaded back into CellSens.
 
 The XML schema has been reverse-engineered from testing overview area XML files - can be saved and loaded through Stage Navigator. The schema has been tested for Olympus CellSens 4.1.1 - if you want to use it for other version, be sure to first test it and confirm that it works. 
+
+The XML file has to be stored in the CellSens internal folder to be detected by the software. The path to the corresponding folder is the following: 
+
+`C:/Users/<username>/AppData/Local/EVIDENT/ETCE/cellSens Dimension/ParamSets/Overview Area/`
+
 
 The current main workflow is tuned for detection of neuromuscular junctions in muscle tissue sections:
 
@@ -14,17 +19,18 @@ The current main workflow is tuned for detection of neuromuscular junctions in m
 6. Plan high-magnification targets as point positions, rectangular tile scans, or irregular polygon mosaics.
 7. Save QC artifacts, target-plan JSON sidecars, CSV summaries, and final CellSens XML.
 
-## Repository §ayout
+The user than has to paste the XML to the `Overview Area` folder in the EVIDENT AppData folder system and open it through CellSens Stage Navigator. 
+
+## Repository layout
 
 ```text
 src/
   run_batch_pixel_classifier_gui.py      Tkinter batch GUI for z-stack processing
-  run_pixel_classifier_example.py        Editable lab script for RF-based workflow
-  run_threshold_example.py               Editable lab script for threshold workflow
-  convert_positions_csv_to_xml.py        Convert/edit CSV targets into CellSens XML
+  run_pixel_classifier_example_260920.py Editable lab script for RF-based workflow
   visualize_cellsens_tiles.py            Visualize planned CellSens tile targets
   smart_acquisition/
     workflow.py                          Stable detector-agnostic orchestration
+    planning_modes.py                    Composed planning-choice labels/tooltips
     outputs.py                           Shared TIFF/CSV QC writers
     batch_workflow.py                    RF compatibility wrapper over workflow.py
     interactive_review.py                napari review and tile-preview helpers
@@ -48,6 +54,9 @@ src/
       polygon_regions.py                 Irregular and Z-aware mosaic planning
       z_estimation.py                    Argmax-Z based region Z estimation
 xml_templates/                           Known-good CellSens XML templates/examples
+docs/
+  ARCHITECTURE.md                        Maintainer overview and extension points
+  PLANNING_MODES.md                      Planning-choice reference
 ```
 
 ## Core concepts
@@ -57,7 +66,7 @@ xml_templates/                           Known-good CellSens XML templates/examp
 The package uses a few shared dataclasses from `smart_acquisition.models`:
 
 - `StagePosition`: one X/Y/Z stage target.
-- `RectangularRegion`: native rectangular CellSens tile-scan region.
+- `RectangularRegion`: rectangular CellSens mosaic region.
 - `PolygonRegion`: irregular CellSens mosaic region.
 - `OverviewImageMetadata`: image size, pixel size, stage anchor, and anchor interpretation.
 - `AcquisitionTile`: high-magnification camera field of view and overlap.
@@ -118,22 +127,22 @@ The RF model is expected to be a joblib bundle with keys:
 
 The classifier must support `predict_proba` when probability outputs or confidence filtering are used.
 
-### Planning modes
+### Planning choices
 
-Planning converts filtered detections into final high-magnification targets.
+Planning converts filtered detections into final high-magnification targets. It
+is configured from several considerations:
 
-| Mode | Output | Typical Use |
-| --- | --- | --- |
-| `raw` | one point per detection | Debugging or direct centroid acquisition |
-| `group_centers` | one point per nearby group | One field of view per cluster |
-| `group_tiles` | grid of point positions | Explicit high-mag tile positions |
-| `mixed_tilescans` | points for small groups, rectangular tile scans for larger groups | Native CellSens rectangular scans |
-| `mixed_irregular_mosaics` | points for isolated detections, polygon mosaics for grouped detections | Reduce empty high-mag coverage |
-| `z_aware_irregular_mosaics` | points/polygon mosaics grouped by XY and Z | Avoid merging detections at different focus planes |
-| `optimized_z_aware_irregular_mosaics` | Z-aware polygons with tile-count-aware merge decisions | Default batch mode for compact mosaics |
-| `z_aware_tiles` | point tiles with per-tile Z estimates | Per-tile focus instead of one Z per ROI |
+- output: detection points, group-center points, tile point grids, rectangular tile scans, or polygon mosaics;
+- grouping: none, XY (objects close enough in XY are grouped together), or XY and Z (objects have to be close in both XY and Z to be grouped);
+- Z handling: overview Z, per-ROI Z, or per-tile Z;
+- optimization: direct grouping or tile-count-aware grouping.
 
 The high-mag field of view comes from `AcquisitionTile`: image width/height in pixels, high-mag pixel size, and tile overlap.
+The composed planning key stores the choices directly, for example
+`custom:polygon_regions|xy_z|per_roi|tile_count`. See
+[`docs/PLANNING_MODES.md`](docs/PLANNING_MODES.md) for the full choice
+reference, including Z handling, GUI behavior, and alpha-shape polygon
+boundaries.
 
 ## Main workflows
 
@@ -172,7 +181,6 @@ For each z-stack, the workflow writes:
 - polygon mosaic CSV;
 - region-confidence CSV;
 - target-plan JSON;
-- optional tile-scan Z histogram CSV;
 - cached z-projection and argmax-Z TIFF/JSON files.
 
 After all selected z-stacks are reviewed, the JSON target plans are combined into one CellSens XML.
@@ -192,6 +200,7 @@ from smart_acquisition.detection.adapters import (
     RandomForestObjectDetector,
 )
 from smart_acquisition.models import AcquisitionTile
+from smart_acquisition.planning_modes import planning_mode_from_choices
 from smart_acquisition.workflow import (
     ReviewConfig,
     TargetPlanningConfig,
@@ -216,7 +225,12 @@ config = WorkflowConfig(
     ),
     review=ReviewConfig(enabled=True, show_tiling_preview=True),
     planning=TargetPlanningConfig(
-        planning_mode="optimized_z_aware_irregular_mosaics",
+        planning_mode=planning_mode_from_choices(
+            output_choice="polygon_regions",
+            grouping_choice="xy_z",
+            z_choice="per_roi",
+            optimization_choice="tile_count",
+        ),
         target_tile=AcquisitionTile(
             width_px=2304,
             height_px=2304,
@@ -298,4 +312,3 @@ Do not scatter raw CellSens numeric IDs through workflow code.
 ## Current limitations
 
 - CellSens XML support is reverse-engineered from provided templates. Unknown template fields are preserved, but new CellSens versions may require validation.
-

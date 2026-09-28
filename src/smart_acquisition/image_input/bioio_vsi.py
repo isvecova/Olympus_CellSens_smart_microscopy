@@ -252,6 +252,8 @@ def _z_positions_um(
     center_z_um: float,
     fallback_z_step_um: float | None,
 ) -> tuple[float, ...]:
+    """Return per-plane stage Z values, falling back to an even Z step if needed."""
+
     z_positions: list[float | None] = [None] * n_z
     for plane in list(getattr(pixels, "planes", None) or []):
         if (
@@ -290,6 +292,8 @@ def _cache_prefix(
     source_pixel_size_x_um: float | None = None,
     source_pixel_size_y_um: float | None = None,
 ) -> Path:
+    """Build a cache filename prefix that includes image and pixel-size choices."""
+
     scene_text = "none" if scene is None else str(scene).replace(" ", "_")
     pixel_text = _pixel_size_cache_text(projection_pixel_size_um)
     source_text = _source_pixel_size_cache_text(
@@ -304,6 +308,8 @@ def _cache_prefix(
 def _pixel_size_cache_text(
     projection_pixel_size_um: float | tuple[float, float] | None,
 ) -> str:
+    """Encode requested projection pixel size for cache filenames."""
+
     if projection_pixel_size_um is None:
         return "pxnative"
     if isinstance(projection_pixel_size_um, tuple):
@@ -324,6 +330,8 @@ def _source_pixel_size_cache_text(
     source_pixel_size_x_um: float | None,
     source_pixel_size_y_um: float | None,
 ) -> str:
+    """Encode source pixel-size override choices for cache filenames."""
+
     if source_pixel_size_x_um is None and source_pixel_size_y_um is None:
         return "srcpx_auto"
     x_text = "auto" if source_pixel_size_x_um is None else _format_cache_float(
@@ -336,6 +344,8 @@ def _source_pixel_size_cache_text(
 
 
 def _format_cache_float(value: float) -> str:
+    """Format a float for filesystem-safe cache names."""
+
     return f"{float(value):.6g}".replace(".", "p").replace("-", "m")
 
 
@@ -349,6 +359,8 @@ def _read_z_projection_cache(
     source_pixel_size_x_um: float | None = None,
     source_pixel_size_y_um: float | None = None,
 ) -> BioioReadResult | None:
+    """Load a cached MIP/argmax-Z pair when all cache sidecars are present."""
+
     prefix = _cache_prefix(
         path,
         scene,
@@ -389,6 +401,8 @@ def _write_z_projection_cache(
     source_pixel_size_x_um: float | None = None,
     source_pixel_size_y_um: float | None = None,
 ) -> None:
+    """Write MIP, argmax-Z, and metadata cache files for later reuse."""
+
     if result.argmax_z is None or result.z_positions_um is None:
         return
 
@@ -429,6 +443,8 @@ def _write_z_projection_cache(
 
 
 def _current_pixels(image: Any) -> Any:
+    """Return the OME Pixels object for the current BioIO scene."""
+
     metadata = getattr(image, "metadata", None)
     images = getattr(metadata, "images", None)
     if not images:
@@ -444,6 +460,8 @@ def _current_pixels(image: Any) -> Any:
 
 
 def _find_plane(pixels: Any, channel: int, z: int, time: int) -> Any:
+    """Find the OME plane matching C/Z/T, or fall back to the first plane."""
+
     planes = list(getattr(pixels, "planes", None) or [])
     if not planes:
         raise BioioMetadataError("BioIO pixels metadata does not contain planes")
@@ -459,6 +477,8 @@ def _find_plane(pixels: Any, channel: int, z: int, time: int) -> Any:
 
 
 def _first_present(*values: Any) -> Any:
+    """Return the first non-None value from fallback candidates."""
+
     for value in values:
         if value is not None:
             return value
@@ -466,6 +486,8 @@ def _first_present(*values: Any) -> Any:
 
 
 def _as_float(value: Any, field_name: str) -> float:
+    """Convert required metadata to float with a useful error message."""
+
     if value is None:
         raise BioioMetadataError(f"Required BioIO metadata field is missing: {field_name}")
     try:

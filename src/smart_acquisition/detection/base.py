@@ -37,6 +37,13 @@ class DetectionContext:
     interactive: bool = False
     selection_callback: SelectionCallback | None = None
     preview_callback: PreviewCallback | None = None
+    preview_planning_modes: tuple[str, ...] = ()
+    current_preview_planning_mode: str | None = None
+    set_preview_planning_mode: Callable[[str], None] | None = None
+    current_preview_merge_distance_factor: float = 1.0
+    set_preview_merge_distance_factor: Callable[[float], None] | None = None
+    current_preview_max_group_z_difference_um: float = 10.0
+    set_preview_max_group_z_difference_um: Callable[[float], None] | None = None
     argmax_z: np.ndarray | None = None
     z_positions_um: tuple[float, ...] | None = None
 
@@ -71,4 +78,3 @@ class ObjectDetector(Protocol):
 
     def detect(self, image: np.ndarray, context: DetectionContext) -> DetectionResult:
         """Return selected positive detections for ``image``."""
-

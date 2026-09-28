@@ -1,4 +1,9 @@
-"""Detector adapters used by the generic workflow."""
+"""Detector adapters used by the generic workflow.
+
+Adapters translate detector-specific APIs into the small `ObjectDetector`
+contract used by `smart_acquisition.workflow`. New detection approaches should
+either implement that protocol directly or follow the adapter pattern here.
+"""
 
 from __future__ import annotations
 
@@ -67,6 +72,8 @@ class RandomForestObjectDetector:
         self.config = config
 
     def detect(self, image: np.ndarray, context: DetectionContext) -> DetectionResult:
+        """Run RF prediction, component filtering, and optional napari review."""
+
         histogram_path = None
         if self.config.write_normalization_histogram:
             histogram_path = context.output_prefix.with_name(
@@ -102,6 +109,19 @@ class RandomForestObjectDetector:
             interactive=context.interactive,
             selection_callback=context.selection_callback,
             preview_callback=context.preview_callback,
+            planning_modes=context.preview_planning_modes,
+            current_planning_mode=context.current_preview_planning_mode,
+            planning_mode_changed_callback=context.set_preview_planning_mode,
+            current_merge_distance_factor=context.current_preview_merge_distance_factor,
+            merge_distance_factor_changed_callback=(
+                context.set_preview_merge_distance_factor
+            ),
+            current_max_group_z_difference_um=(
+                context.current_preview_max_group_z_difference_um
+            ),
+            max_group_z_difference_changed_callback=(
+                context.set_preview_max_group_z_difference_um
+            ),
         )
         return DetectionResult(
             mask=result.mask,
@@ -119,6 +139,8 @@ class ThresholdObjectDetector:
         self.config = config
 
     def detect(self, image: np.ndarray, context: DetectionContext) -> DetectionResult:
+        """Run threshold segmentation and return workflow-compatible detections."""
+
         threshold_result = ThresholdDetector(
             threshold=self.config.threshold,
             percentile=(
@@ -148,6 +170,21 @@ class ThresholdObjectDetector:
                 pixel_size_y_um=context.pixel_size_y_um,
                 selection_callback=context.selection_callback,
                 preview_callback=context.preview_callback,
+                planning_modes=context.preview_planning_modes,
+                current_planning_mode=context.current_preview_planning_mode,
+                planning_mode_changed_callback=context.set_preview_planning_mode,
+                current_merge_distance_factor=(
+                    context.current_preview_merge_distance_factor
+                ),
+                merge_distance_factor_changed_callback=(
+                    context.set_preview_merge_distance_factor
+                ),
+                current_max_group_z_difference_um=(
+                    context.current_preview_max_group_z_difference_um
+                ),
+                max_group_z_difference_changed_callback=(
+                    context.set_preview_max_group_z_difference_um
+                ),
             )
             return DetectionResult(
                 mask=mask,
@@ -194,6 +231,8 @@ def _limit_measurements_by_area(
     measurements,
     max_selected_objects: int | None,
 ):
+    """Keep the largest components when a simple noninteractive cap is requested."""
+
     if max_selected_objects is None or max_selected_objects <= 0:
         return mask, measurements
     if len(measurements) <= max_selected_objects:

@@ -111,6 +111,8 @@ def write_combined_cellsens_xml(
 
 
 def _target_plan_to_payload(plan: TargetPlan) -> dict:
+    """Convert dataclass target objects into JSON-serializable primitives."""
+
     return {
         "source_image": plan.source_image,
         "planning_mode": plan.planning_mode,
@@ -127,6 +129,8 @@ def _target_plan_to_payload(plan: TargetPlan) -> dict:
 
 
 def _target_plan_from_payload(payload: dict) -> TargetPlan:
+    """Rebuild target dataclasses from a JSON sidecar payload."""
+
     return TargetPlan(
         source_image=str(payload["source_image"]),
         planning_mode=str(payload["planning_mode"]),
@@ -161,5 +165,7 @@ def _prefixed_name(
     fallback_kind: str,
     index: int,
 ) -> str:
+    """Prefix names so targets from combined source images remain traceable."""
+
     name = current_name or f"{fallback_kind} {index}"
     return f"{prefix} - {name}"

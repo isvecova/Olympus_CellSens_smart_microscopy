@@ -13,6 +13,8 @@ from smart_acquisition.targeting.coordinate_transform import AffinePixelToStage
 
 @dataclass(frozen=True)
 class ComponentMeasurement:
+    """Basic connected-component measurement with its stage centroid."""
+
     label: int
     area_px: int
     centroid_x_px: float

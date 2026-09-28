@@ -4,9 +4,22 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from pathlib import Path
+from time import perf_counter
 from typing import Any, Callable
 
 import numpy as np
+
+from smart_acquisition.planning_modes import (
+    GROUPING_CHOICE_LABELS,
+    OPTIMIZATION_CHOICE_LABELS,
+    OUTPUT_CHOICE_LABELS,
+    Z_CHOICE_LABELS,
+    get_planning_strategy,
+    normalize_planning_mode,
+    planning_choices_for_mode,
+    planning_mode_from_choices,
+    planning_mode_tooltip,
+)
 
 
 @dataclass(frozen=True)
@@ -381,6 +394,8 @@ def _normalization_histogram_bin_count(
     upper: float,
     requested_bins: int,
 ) -> int:
+    """Choose enough bins for integer-like intensity data without oversampling."""
+
     span = max(float(upper - lower), np.finfo(float).eps)
     requested_bins = max(8, int(requested_bins))
     finite_values = np.asarray(values)[np.isfinite(values)]
@@ -404,6 +419,8 @@ def _signal_peak_search_mask(
     mixture_diagnostics: dict[str, Any],
     use_mixture_peak: bool,
 ) -> np.ndarray:
+    """Limit peak detection to the fitted signal component when possible."""
+
     if centers.size == 0:
         return np.zeros_like(centers, dtype=bool)
     if not use_mixture_peak:
@@ -434,6 +451,8 @@ def _poisson_gaussian_threshold(
     upper: float,
     gaussian_mean: float,
 ) -> float:
+    """Estimate the intensity threshold separating floor and signal components."""
+
     denominator = poisson_component + gaussian_component + np.finfo(float).eps
     gaussian_posterior = gaussian_component / denominator
     candidate_mask = (
@@ -461,6 +480,8 @@ def _background_subtracted_search_histogram(
     mixture_diagnostics: dict[str, Any],
     lower_absolute: float,
 ) -> np.ndarray:
+    """Subtract the fitted background floor before looking for the signal peak."""
+
     if centers.size < 2:
         return histogram.astype(np.float32)
 
@@ -484,6 +505,8 @@ def _poisson_component(
     poisson_lambda: float,
     lower_absolute: float,
 ) -> np.ndarray:
+    """Evaluate the shifted Poisson-like background component."""
+
     from scipy.special import gammaln
 
     shifted_centers = np.maximum(centers - lower_absolute, 0.0)
@@ -510,6 +533,8 @@ def _write_normalization_histogram(
     muscle_peak: float,
     histogram_label: str = "clipped intensity histogram",
 ) -> None:
+    """Write a diagnostic plot of normalization histogram fitting."""
+
     output_path = Path(path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -600,6 +625,8 @@ def _write_normalization_histogram_csv(
     *,
     mixture_diagnostics: dict[str, Any],
 ) -> None:
+    """Write histogram diagnostics as CSV when matplotlib is unavailable."""
+
     centers = mixture_diagnostics["centers"]
     columns = (
         mixture_diagnostics["histogram"],
@@ -743,7 +770,7 @@ def _predict_tiled_impl(
     prediction_mask: np.ndarray | None,
     positive_label: int | None,
 ) -> tuple[np.ndarray, np.ndarray | None]:
-    """Predict a large 2D image tile by tile."""
+    """Predict a large 2D image tile by tile with optional probability output."""
 
     image_2d = np.asarray(image)
     if image_2d.ndim != 2:
@@ -871,6 +898,8 @@ def _predict_flat_labels_and_probability(
     *,
     positive_label: int | None,
 ) -> tuple[np.ndarray, np.ndarray | None]:
+    """Run the classifier on a flattened feature matrix."""
+
     if positive_label is None:
         return np.asarray(model.predict(flat_features)), None
 
@@ -955,6 +984,8 @@ def _component_confidence_values(
     region: Any,
     positive_probability: np.ndarray | None,
 ) -> tuple[float, float, float, float]:
+    """Summarize positive-class probability over one component mask."""
+
     if positive_probability is None:
         nan = float("nan")
         return nan, nan, nan, nan
@@ -1140,6 +1171,13 @@ class NormalizedRandomForestDetector:
             NapariTilingPreview,
         ]
         | None = None,
+        planning_modes: tuple[str, ...] = (),
+        current_planning_mode: str | None = None,
+        planning_mode_changed_callback: Callable[[str], None] | None = None,
+        current_merge_distance_factor: float = 1.0,
+        merge_distance_factor_changed_callback: Callable[[float], None] | None = None,
+        current_max_group_z_difference_um: float = 10.0,
+        max_group_z_difference_changed_callback: Callable[[float], None] | None = None,
     ) -> RandomForestDetectionResult:
         """Run prediction, optionally pause in napari, and return selected mask."""
 
@@ -1162,6 +1200,17 @@ class NormalizedRandomForestDetector:
                 normalized_image=normalized_image,
                 selection_callback=selection_callback,
                 preview_callback=preview_callback,
+                planning_modes=planning_modes,
+                current_planning_mode=current_planning_mode,
+                planning_mode_changed_callback=planning_mode_changed_callback,
+                current_merge_distance_factor=current_merge_distance_factor,
+                merge_distance_factor_changed_callback=(
+                    merge_distance_factor_changed_callback
+                ),
+                current_max_group_z_difference_um=current_max_group_z_difference_um,
+                max_group_z_difference_changed_callback=(
+                    max_group_z_difference_changed_callback
+                ),
             )
         else:
             mask, measurements = filter_components(
@@ -1212,6 +1261,13 @@ def run_napari_filter(
         NapariTilingPreview,
     ]
     | None = None,
+    planning_modes: tuple[str, ...] = (),
+    current_planning_mode: str | None = None,
+    planning_mode_changed_callback: Callable[[str], None] | None = None,
+    current_merge_distance_factor: float = 1.0,
+    merge_distance_factor_changed_callback: Callable[[float], None] | None = None,
+    current_max_group_z_difference_um: float = 10.0,
+    max_group_z_difference_changed_callback: Callable[[float], None] | None = None,
 ) -> tuple[np.ndarray, tuple[ComponentMeasurement, ...]]:
     """Show predictions in napari and return filters confirmed with ``OK``."""
 
@@ -1220,6 +1276,7 @@ def run_napari_filter(
         from qtpy.QtCore import QTimer
         from qtpy.QtWidgets import (
             QDoubleSpinBox,
+            QComboBox,
             QFormLayout,
             QPushButton,
             QSpinBox,
@@ -1252,13 +1309,14 @@ def run_napari_filter(
     }
 
     viewer = napari.Viewer(title="Confirm smart-acquisition detections")
-    viewer.add_image(np.asarray(image), name="Overview image")
-    if normalized_image is not None:
-        viewer.add_image(
-            np.asarray(normalized_image),
-            name="Normalized image",
-            visible=False,
-        )
+    display_image = np.asarray(
+        normalized_image if normalized_image is not None else image
+    )
+    viewer.add_image(
+        display_image,
+        name="Normalized image" if normalized_image is not None else "Image",
+        contrast_limits=_zero_to_percentile_limits(display_image),
+    )
     viewer.add_labels(
         np.asarray(prediction_labels),
         name="RF prediction labels",
@@ -1337,7 +1395,7 @@ def run_napari_filter(
     )
     try:
         filtered_layer.selected_label = 0
-        filtered_layer.mode = "fill"
+        _set_layer_mode(filtered_layer, "pan_zoom")
     except Exception:
         pass
 
@@ -1359,11 +1417,19 @@ def run_napari_filter(
         requested_count: int,
         *,
         update_tiles: bool = False,
+        optimize_count_selection: bool = False,
     ) -> None:
         nonlocal active_labels, tile_selected_labels, updating_layer
         nonlocal last_preview, tiles_are_current
+        timing_enabled = update_tiles or optimize_count_selection
+        total_start = perf_counter()
         if not update_tiles:
             tiles_are_current = False
+            _clear_preview_layers(
+                tile_shapes_layer=tile_shapes_layer,
+                region_shapes_layer=region_shapes_layer,
+                target_points_layer=target_points_layer,
+            )
         area_max_value = None if area_max <= 0 else max(area_min, area_max)
         elongation_max_value = max(elongation_min, elongation_max)
         max_mean_3nn_distance_value = (
@@ -1380,6 +1446,7 @@ def run_napari_filter(
             max_mean_3nn_distance_um=max_mean_3nn_distance_value,
             min_size_weighted_confidence=min_confidence_value,
         )
+        start = perf_counter()
         candidate_mask, candidate_measurements = filter_component_labels(
             component_labels,
             measurements,
@@ -1388,15 +1455,28 @@ def run_napari_filter(
             pixel_size_y_um=pixel_size_y_um,
             excluded_labels=deleted_labels,
         )
+        _log_napari_timing(
+            "filter labels",
+            start,
+            enabled=timing_enabled,
+            extra=f"{len(candidate_measurements)} candidate objects",
+        )
         kept_measurements = candidate_measurements
         if requested_count > 0 and len(candidate_measurements) > requested_count:
-            if update_tiles and selection_callback is not None:
+            if optimize_count_selection and selection_callback is not None:
+                start = perf_counter()
                 kept_measurements = selection_callback(
                     candidate_measurements,
                     requested_count,
                     candidate_mask,
                     component_labels,
                     np.asarray(prediction_labels),
+                )
+                _log_napari_timing(
+                    "selection callback",
+                    start,
+                    enabled=timing_enabled,
+                    extra=f"{len(kept_measurements)} selected objects",
                 )
                 tile_selected_labels = {
                     measurement.label for measurement in kept_measurements
@@ -1433,24 +1513,43 @@ def run_napari_filter(
         )
 
         if update_tiles and preview_callback is not None:
+            start = perf_counter()
             last_preview = preview_callback(
                 mask,
                 tuple(kept_measurements),
                 np.asarray(prediction_labels),
             )
+            _log_napari_timing(
+                "preview callback",
+                start,
+                enabled=timing_enabled,
+                extra=f"{last_preview.tile_count} tiles",
+            )
+            start = perf_counter()
             _update_preview_layers(
                 last_preview,
                 tile_shapes_layer=tile_shapes_layer,
                 region_shapes_layer=region_shapes_layer,
                 target_points_layer=target_points_layer,
             )
+            _log_napari_timing(
+                "update preview layers",
+                start,
+                enabled=timing_enabled,
+            )
             tiles_are_current = True
 
+        start = perf_counter()
         try:
             updating_layer = True
             filtered_layer.data = _filtered_component_data(mask, component_labels)
         finally:
             updating_layer = False
+        _log_napari_timing(
+            "update filtered labels layer",
+            start,
+            enabled=timing_enabled,
+        )
         active_labels = kept_labels
         preview_suffix = _preview_status_suffix(
             last_preview,
@@ -1461,8 +1560,21 @@ def run_napari_filter(
             f"Filtered detections ({len(kept_measurements)} objects"
             f"{preview_suffix}, {len(deleted_labels)} deleted)"
         )
+        preview_summary_label.setText(
+            _preview_summary_text(
+                last_preview,
+                preview_enabled=preview_callback is not None,
+                tiles_are_current=tiles_are_current,
+            )
+        )
         selected["mask"] = mask
         selected["measurements"] = kept_measurements
+        _log_napari_timing(
+            "update filters total",
+            total_start,
+            enabled=timing_enabled,
+            extra=f"{len(kept_measurements)} kept objects",
+        )
 
     initial_max_area = 0 if max_area_px is None else max_area_px
     initial_max_mean_3nn_distance = (
@@ -1484,6 +1596,9 @@ def run_napari_filter(
     min_area_widget.setRange(0, 100_000_000)
     min_area_widget.setSingleStep(10)
     min_area_widget.setValue(min_area_px)
+    min_area_widget.setToolTip(
+        "Keep only detected objects with at least this many pixels."
+    )
     form.addRow("Min area px", min_area_widget)
 
     max_area_widget = QSpinBox()
@@ -1491,6 +1606,9 @@ def run_napari_filter(
     max_area_widget.setSingleStep(10)
     max_area_widget.setSpecialValueText("No maximum")
     max_area_widget.setValue(initial_max_area)
+    max_area_widget.setToolTip(
+        "Discard objects larger than this pixel area. Use 'No maximum' to disable."
+    )
     form.addRow("Max area px", max_area_widget)
 
     min_elongation_widget = QDoubleSpinBox()
@@ -1498,6 +1616,10 @@ def run_napari_filter(
     min_elongation_widget.setSingleStep(0.01)
     min_elongation_widget.setDecimals(2)
     min_elongation_widget.setValue(min_elongation)
+    min_elongation_widget.setToolTip(
+        "Keep only objects at least this elongated. 0 is round; values near 1 "
+        "are line-like."
+    )
     form.addRow("Min elongation", min_elongation_widget)
 
     max_elongation_widget = QDoubleSpinBox()
@@ -1505,6 +1627,9 @@ def run_napari_filter(
     max_elongation_widget.setSingleStep(0.01)
     max_elongation_widget.setDecimals(2)
     max_elongation_widget.setValue(max_elongation)
+    max_elongation_widget.setToolTip(
+        "Discard objects more elongated than this. 1 allows very line-like objects."
+    )
     form.addRow("Max elongation", max_elongation_widget)
 
     max_mean_3nn_distance_widget = QDoubleSpinBox()
@@ -1513,6 +1638,10 @@ def run_napari_filter(
     max_mean_3nn_distance_widget.setDecimals(1)
     max_mean_3nn_distance_widget.setSpecialValueText("No maximum")
     max_mean_3nn_distance_widget.setValue(initial_max_mean_3nn_distance)
+    max_mean_3nn_distance_widget.setToolTip(
+        "Discard isolated objects whose mean distance to the three nearest "
+        "neighbors is above this many micrometres. Use 'No maximum' to disable."
+    )
     form.addRow("Max mean 3NN distance um", max_mean_3nn_distance_widget)
 
     min_confidence_widget = QDoubleSpinBox()
@@ -1521,6 +1650,10 @@ def run_napari_filter(
     min_confidence_widget.setDecimals(3)
     min_confidence_widget.setSpecialValueText("No minimum")
     min_confidence_widget.setValue(initial_min_confidence)
+    min_confidence_widget.setToolTip(
+        "Keep only objects whose size-weighted classifier confidence is at "
+        "least this value. Use 'No minimum' to disable."
+    )
     form.addRow("Min weighted confidence", min_confidence_widget)
 
     object_count_widget = QSpinBox()
@@ -1528,21 +1661,151 @@ def run_napari_filter(
     object_count_widget.setSingleStep(1)
     object_count_widget.setSpecialValueText("All filtered")
     object_count_widget.setValue(initial_max_selected_objects)
+    object_count_widget.setToolTip(
+        "Optional cap on selected objects. Set to 'All filtered' to keep every "
+        "object passing the current filters and skip count-limited selection."
+    )
     form.addRow("Selected object count", object_count_widget)
 
+    planning_choice_widgets: list[QComboBox] = []
+    planning_choice_tooltips: list[str] = []
+    planning_mode_keys: list[str] = []
+    planning_status_label = None
+    merge_distance_label = None
+    merge_distance_widget = None
+    z_group_diff_label = None
+    z_group_diff_widget = None
+    if planning_modes and planning_mode_changed_callback is not None:
+        for mode in planning_modes:
+            mode_key = normalize_planning_mode(mode)
+            if mode_key not in planning_mode_keys:
+                planning_mode_keys.append(mode_key)
+        current_mode_key = (
+            normalize_planning_mode(current_planning_mode)
+            if current_planning_mode is not None
+            else planning_mode_keys[0]
+        )
+        output_choice, grouping_choice, z_choice, optimization_choice = (
+            planning_choices_for_mode(current_mode_key)
+        )
+        planning_choice_specs = (
+            (
+                "Planning output",
+                OUTPUT_CHOICE_LABELS,
+                output_choice,
+                "Choose what kind of acquisition target is generated: points, "
+                "tile grids, rectangular tile scans, or polygon mosaics.",
+            ),
+            (
+                "Planning grouping",
+                GROUPING_CHOICE_LABELS,
+                grouping_choice,
+                "Choose how detected objects are grouped before targets are made. "
+                "XY uses stage distance; XY and Z also limits the allowed Z span.",
+            ),
+            (
+                "Planning Z handling",
+                Z_CHOICE_LABELS,
+                z_choice,
+                "Choose how focus Z is assigned. Overview uses the overview Z; "
+                "per ROI estimates one Z for each final target; per tile assigns "
+                "Z separately to tile-grid points.",
+            ),
+            (
+                "Planning optimization",
+                OPTIMIZATION_CHOICE_LABELS,
+                optimization_choice,
+                "Choose whether to group directly or use tile-count-aware grouping "
+                "to reduce extra imaged area.",
+            ),
+        )
+        for label, choices, current_choice, widget_tooltip in planning_choice_specs:
+            widget = QComboBox()
+            widget.addItems(list(choices.values()))
+            widget.setCurrentText(choices[current_choice])
+            widget.setToolTip(
+                f"{widget_tooltip}\n\nCurrent combination:\n"
+                f"{planning_mode_tooltip(current_mode_key)}"
+            )
+            form.addRow(label, widget)
+            planning_choice_widgets.append(widget)
+            planning_choice_tooltips.append(widget_tooltip)
+        planning_status_label = QLabel(
+            f"Planning mode: {get_planning_strategy(current_mode_key).label}"
+        )
+        planning_status_label.setToolTip(planning_mode_tooltip(current_mode_key))
+        form.addRow(planning_status_label)
+        merge_distance_label = QLabel("Merge distance factor")
+        merge_distance_widget = QDoubleSpinBox()
+        merge_distance_widget.setRange(0.0, 100.0)
+        merge_distance_widget.setSingleStep(0.1)
+        merge_distance_widget.setDecimals(2)
+        merge_distance_widget.setValue(float(current_merge_distance_factor))
+        merge_distance_widget.setToolTip(
+            "Controls how far apart detections may be and still be grouped. "
+            "This factor is multiplied by the high-magnification tile width and "
+            "height; larger values merge more distant objects into fewer regions."
+        )
+        form.addRow(merge_distance_label, merge_distance_widget)
+        z_group_diff_label = QLabel("Max group Z diff um")
+        z_group_diff_widget = QDoubleSpinBox()
+        z_group_diff_widget.setRange(0.0, 1_000_000.0)
+        z_group_diff_widget.setSingleStep(1.0)
+        z_group_diff_widget.setDecimals(2)
+        z_group_diff_widget.setValue(float(current_max_group_z_difference_um))
+        z_group_diff_widget.setToolTip(
+            "Maximum Z span allowed when grouping uses XY and Z."
+        )
+        form.addRow(z_group_diff_label, z_group_diff_widget)
+
+    preview_summary_label = QLabel(
+        _preview_summary_text(
+            last_preview,
+            preview_enabled=preview_callback is not None,
+            tiles_are_current=tiles_are_current,
+        )
+    )
+    preview_summary_label.setToolTip(
+        "Current tile preview summary. Counts update after Update tile preview "
+        "or Optimize count selection."
+    )
+    form.addRow(preview_summary_label)
+
     deleted_label = QLabel("Manual deletions: 0")
+    deleted_label.setToolTip("Number of objects manually removed in this review.")
     form.addRow(deleted_label)
 
     reset_deleted_button = QPushButton("Reset manual deletions")
+    reset_deleted_button.setToolTip(
+        "Restore objects that were removed by click-delete or manual label editing."
+    )
     form.addRow(reset_deleted_button)
 
     click_delete_button = QPushButton("Enable click-delete")
+    click_delete_button.setToolTip(
+        "Toggle click-delete mode. When enabled, clicking an object in the final "
+        "mask removes it from the selection."
+    )
     form.addRow(click_delete_button)
 
-    update_tiles_button = QPushButton("Update tiles/count selection")
+    update_tiles_button = QPushButton("Update tile preview")
+    update_tiles_button.setToolTip(
+        "Fast path: rebuild the tile/ROI preview for the objects already passing "
+        "the filters. This does not change the object-count setting or run the "
+        "count optimizer."
+    )
     form.addRow(update_tiles_button)
 
+    optimize_count_button = QPushButton("Optimize count selection")
+    optimize_count_button.setToolTip(
+        "Slower path: when Selected object count is set, choose a compact subset "
+        "that aims to reduce the planned tile count. If object count is 'All "
+        "filtered', this falls back to updating the tile preview only."
+    )
+    form.addRow(optimize_count_button)
+
     ok_button = QPushButton("OK")
+    ok_button.setToolTip("Accept the current final mask and close the review window.")
     form.addRow(ok_button)
 
     def refresh_from_widget_values() -> None:
@@ -1559,7 +1822,20 @@ def run_napari_filter(
         )
 
     def update_tiles_from_widget_values(_checked: bool = False) -> None:
+        """Update tile preview for the currently selected filtered objects."""
+
+        total_start = perf_counter()
         deleted_label.setText(f"Manual deletions: {len(deleted_labels)}")
+        update_current_tile_preview()
+        _log_napari_timing("Update tile preview button total", total_start)
+
+    def optimize_count_from_widget_values(_checked: bool = False) -> None:
+        total_start = perf_counter()
+        deleted_label.setText(f"Manual deletions: {len(deleted_labels)}")
+        if object_count_widget.value() <= 0:
+            update_current_tile_preview()
+            _log_napari_timing("Optimize count button total", total_start)
+            return
         update_filters(
             min_area_widget.value(),
             max_area_widget.value(),
@@ -1569,10 +1845,142 @@ def run_napari_filter(
             min_confidence_widget.value(),
             object_count_widget.value(),
             update_tiles=True,
+            optimize_count_selection=True,
         )
+        _log_napari_timing("Optimize count button total", total_start)
+
+    def update_current_tile_preview() -> None:
+        nonlocal last_preview, tiles_are_current
+        if preview_callback is None:
+            return
+
+        total_start = perf_counter()
+        current_mask = selected.get("mask")
+        current_measurements = selected.get("measurements", ())
+        if current_mask is None:
+            start = perf_counter()
+            refresh_from_widget_values()
+            _log_napari_timing("refresh filters before preview", start)
+            current_mask = selected.get("mask")
+            current_measurements = selected.get("measurements", ())
+        if current_mask is None:
+            return
+
+        start = perf_counter()
+        last_preview = preview_callback(
+            np.asarray(current_mask, dtype=bool),
+            tuple(current_measurements),
+            np.asarray(prediction_labels),
+        )
+        _log_napari_timing(
+            "preview callback",
+            start,
+            extra=f"{last_preview.tile_count} tiles",
+        )
+        start = perf_counter()
+        _update_preview_layers(
+            last_preview,
+            tile_shapes_layer=tile_shapes_layer,
+            region_shapes_layer=region_shapes_layer,
+            target_points_layer=target_points_layer,
+        )
+        _log_napari_timing("update preview layers", start)
+        tiles_are_current = True
+        start = perf_counter()
+        filtered_layer.name = (
+            f"Filtered detections ({len(current_measurements)} objects"
+            f"{_preview_status_suffix(last_preview, preview_enabled=True, tiles_are_current=True)}, "
+            f"{len(deleted_labels)} deleted)"
+        )
+        preview_summary_label.setText(
+            _preview_summary_text(
+                last_preview,
+                preview_enabled=True,
+                tiles_are_current=True,
+            )
+        )
+        _log_napari_timing("update preview status", start)
+        _log_napari_timing(
+            "update current tile preview total",
+            total_start,
+            extra=f"{len(current_measurements)} objects",
+        )
+
+    def mark_tile_preview_stale() -> None:
+        nonlocal tiles_are_current
+        if preview_callback is None:
+            return
+        tiles_are_current = False
+        _clear_preview_layers(
+            tile_shapes_layer=tile_shapes_layer,
+            region_shapes_layer=region_shapes_layer,
+            target_points_layer=target_points_layer,
+        )
+        current_measurements = selected.get("measurements", ())
+        filtered_layer.name = (
+            f"Filtered detections ({len(current_measurements)} objects"
+            f"{_preview_status_suffix(last_preview, preview_enabled=True, tiles_are_current=False)}, "
+            f"{len(deleted_labels)} deleted)"
+        )
+        preview_summary_label.setText(
+            _preview_summary_text(
+                last_preview,
+                preview_enabled=True,
+                tiles_are_current=False,
+            )
+        )
+
+    def update_grouping_control_visibility() -> None:
+        if not planning_choice_widgets:
+            return
+        grouping_label = planning_choice_widgets[1].currentText()
+        merge_visible = grouping_label != GROUPING_CHOICE_LABELS["none"]
+        if merge_distance_widget is not None:
+            merge_distance_widget.setVisible(merge_visible)
+        if merge_distance_label is not None:
+            merge_distance_label.setVisible(merge_visible)
+        z_visible = grouping_label == GROUPING_CHOICE_LABELS["xy_z"]
+        if z_group_diff_widget is not None:
+            z_group_diff_widget.setVisible(z_visible)
+        if z_group_diff_label is not None:
+            z_group_diff_label.setVisible(z_visible)
+
+    def change_planning_mode(_label: str) -> None:
+        try:
+            mode_key = _planning_mode_from_review_widgets(
+                planning_choice_widgets,
+            )
+        except ValueError as exc:
+            planning_status_label.setText(str(exc))
+            planning_status_label.setToolTip(str(exc))
+            return
+        tooltip = planning_mode_tooltip(mode_key)
+        planning_status_label.setText(
+            f"Planning mode: {get_planning_strategy(mode_key).label}"
+        )
+        planning_status_label.setToolTip(tooltip)
+        planning_mode_changed_callback(mode_key)
+        for widget, widget_tooltip in zip(
+            planning_choice_widgets,
+            planning_choice_tooltips,
+        ):
+            widget.setToolTip(f"{widget_tooltip}\n\nCurrent combination:\n{tooltip}")
+        update_grouping_control_visibility()
+        mark_tile_preview_stale()
+
+    def change_merge_distance_factor(value: float) -> None:
+        if merge_distance_factor_changed_callback is not None:
+            merge_distance_factor_changed_callback(float(value))
+        mark_tile_preview_stale()
+
+    def change_max_group_z_difference(value: float) -> None:
+        if max_group_z_difference_changed_callback is not None:
+            max_group_z_difference_changed_callback(float(value))
+        mark_tile_preview_stale()
 
     def reset_manual_deletions(_checked: bool = False) -> None:
         deleted_labels.clear()
+        _clear_manual_delete_point_layers(viewer)
         refresh_from_widget_values()
 
     def toggle_click_delete(_checked: bool = False) -> None:
@@ -1628,9 +2036,16 @@ def run_napari_filter(
     max_mean_3nn_distance_widget.valueChanged.connect(refresh_from_widget_values)
     min_confidence_widget.valueChanged.connect(refresh_from_widget_values)
     object_count_widget.valueChanged.connect(refresh_from_widget_values)
+    for planning_choice_widget in planning_choice_widgets:
+        planning_choice_widget.currentTextChanged.connect(change_planning_mode)
+    if merge_distance_widget is not None:
+        merge_distance_widget.valueChanged.connect(change_merge_distance_factor)
+    if z_group_diff_widget is not None:
+        z_group_diff_widget.valueChanged.connect(change_max_group_z_difference)
     reset_deleted_button.pressed.connect(reset_manual_deletions)
     click_delete_button.pressed.connect(toggle_click_delete)
     update_tiles_button.pressed.connect(update_tiles_from_widget_values)
+    optimize_count_button.pressed.connect(optimize_count_from_widget_values)
     filtered_layer.events.data.connect(record_manual_deletions)
     filtered_layer.mouse_drag_callbacks.append(delete_clicked_object)
     ok_button.pressed.connect(accept_filters)
@@ -1645,12 +2060,52 @@ def run_napari_filter(
         initial_max_selected_objects,
         update_tiles=False,
     )
+    update_grouping_control_visibility()
     viewer.window.add_dock_widget(filter_widget, area="right", name="Filters")
     napari.run()
 
     if not selected["accepted"]:
         raise RuntimeError("Interactive filtering was closed before pressing OK")
     return selected["mask"], selected["measurements"]
+
+
+def _planning_mode_from_review_widgets(
+    widgets: list[Any],
+) -> str:
+    """Read the four napari planning widgets into one composed planning key."""
+
+    output_choice = _planning_choice_key_from_label(
+        widgets[0].currentText(),
+        OUTPUT_CHOICE_LABELS,
+    )
+    grouping_choice = _planning_choice_key_from_label(
+        widgets[1].currentText(),
+        GROUPING_CHOICE_LABELS,
+    )
+    z_choice = _planning_choice_key_from_label(
+        widgets[2].currentText(),
+        Z_CHOICE_LABELS,
+    )
+    optimization_choice = _planning_choice_key_from_label(
+        widgets[3].currentText(),
+        OPTIMIZATION_CHOICE_LABELS,
+    )
+    return planning_mode_from_choices(
+        output_choice=output_choice,
+        grouping_choice=grouping_choice,
+        z_choice=z_choice,
+        optimization_choice=optimization_choice,
+    )
+
+
+def _planning_choice_key_from_label(label: str, choices: dict[str, str]) -> str:
+    """Map a user-facing planning label back to its internal choice key."""
+
+    labels_to_keys = {value: key for key, value in choices.items()}
+    try:
+        return labels_to_keys[label]
+    except KeyError as exc:
+        raise ValueError(f"Unknown planning choice: {label}") from exc
 
 
 def _update_preview_layers(
@@ -1660,6 +2115,8 @@ def _update_preview_layers(
     region_shapes_layer: Any,
     target_points_layer: Any,
 ) -> None:
+    """Replace napari preview layers with the current tile/ROI geometry."""
+
     if tile_shapes_layer is not None:
         tile_shapes_layer.data = list(preview.tile_rectangles_yx)
     if region_shapes_layer is not None:
@@ -1674,11 +2131,51 @@ def _update_preview_layers(
             target_points_layer.data = np.empty((0, 2), dtype=np.float32)
 
 
+def _clear_preview_layers(
+    *,
+    tile_shapes_layer: Any,
+    region_shapes_layer: Any,
+    target_points_layer: Any,
+) -> None:
+    """Remove stale napari preview geometry from view."""
+
+    if tile_shapes_layer is not None:
+        tile_shapes_layer.data = []
+    if region_shapes_layer is not None:
+        region_shapes_layer.data = []
+    if target_points_layer is not None:
+        target_points_layer.data = np.empty((0, 2), dtype=np.float32)
+
+
+def _clear_manual_delete_point_layers(viewer: Any) -> None:
+    """Clear optional manual deletion point-marker layers if present."""
+
+    for layer_name in (
+        "Manual deleted points",
+        "Manual deletion points",
+        "Deleted points",
+    ):
+        try:
+            layer = viewer.layers[layer_name]
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not hasattr(layer, "data"):
+            continue
+        try:
+            layer.data = np.empty((0, 2), dtype=np.float32)
+        except Exception:
+            layer.data = []
+
+
 def _filtered_component_data(mask: np.ndarray, component_labels: np.ndarray) -> np.ndarray:
+    """Return label data restricted to currently selected mask pixels."""
+
     return np.where(mask, component_labels, 0).astype(component_labels.dtype, copy=False)
 
 
 def _event_data_yx(layer: Any, event: Any) -> tuple[int, int] | None:
+    """Convert a napari mouse event into integer image Y/X coordinates."""
+
     position = getattr(event, "position", None)
     if position is None:
         return None
@@ -1699,6 +2196,8 @@ def _preview_status_suffix(
     preview_enabled: bool,
     tiles_are_current: bool,
 ) -> str:
+    """Return compact status text describing whether preview tiles are current."""
+
     if not preview_enabled:
         return ""
     if tiles_are_current:
@@ -1708,7 +2207,80 @@ def _preview_status_suffix(
     return ", tiles not updated"
 
 
+def _preview_summary_text(
+    preview: NapariTilingPreview,
+    *,
+    preview_enabled: bool,
+    tiles_are_current: bool,
+) -> str:
+    """Return a compact summary of the current preview tile/region counts."""
+
+    if not preview_enabled:
+        return "Tile preview: disabled"
+    if tiles_are_current:
+        return (
+            f"Tile preview: {preview.tile_count} total tiles, "
+            f"{preview.target_count} regions"
+        )
+    if preview.tile_count > 0 or preview.target_count > 0:
+        return (
+            f"Tile preview: last {preview.tile_count} total tiles, "
+            f"{preview.target_count} regions"
+        )
+    return "Tile preview: not updated"
+
+
+def _zero_to_percentile_limits(
+    image: np.ndarray,
+    percentile: float = 99.99,
+) -> tuple[float, float]:
+    """Return display contrast limits from zero to an upper percentile."""
+
+    values = np.asarray(image, dtype=np.float32)
+    finite_values = values[np.isfinite(values)]
+    if finite_values.size == 0:
+        return 0.0, 1.0
+    upper = float(np.percentile(finite_values, percentile))
+    if not np.isfinite(upper) or upper <= 0:
+        upper = float(np.max(finite_values))
+    if not np.isfinite(upper) or upper <= 0:
+        upper = 1.0
+    return 0.0, upper
+
+
+def _set_layer_mode(layer: Any, mode: str, *, fallback: str | None = None) -> None:
+    """Set a napari layer mode, ignoring unsupported modes across versions."""
+
+    try:
+        layer.mode = mode
+    except Exception:
+        if fallback is None:
+            return
+        try:
+            layer.mode = fallback
+        except Exception:
+            return
+
+
+def _log_napari_timing(
+    label: str,
+    start: float,
+    *,
+    enabled: bool = True,
+    extra: str | None = None,
+) -> None:
+    """Print elapsed wall time for an interactive napari UI step."""
+
+    if not enabled:
+        return
+    elapsed_s = perf_counter() - start
+    suffix = f" ({extra})" if extra else ""
+    print(f"[timing] napari UI: {label}: {elapsed_s:.3f} s{suffix}")
+
+
 def _validate_filter_limits(limits: ComponentFilterLimits) -> None:
+    """Validate interactive and scripted component-filter limits."""
+
     if limits.min_area_px < 0:
         raise ValueError("min_area_px must be non-negative")
     if limits.max_area_px is not None and limits.max_area_px < limits.min_area_px:
@@ -1740,6 +2312,8 @@ def _mean_nearest_neighbor_distances_um(
     pixel_size_y_um: float,
     neighbor_count: int,
 ) -> np.ndarray:
+    """Compute mean distance to nearest neighboring component centroids."""
+
     if pixel_size_x_um <= 0 or pixel_size_y_um <= 0:
         raise ValueError("pixel sizes must be positive")
     if neighbor_count <= 0:
@@ -1773,6 +2347,8 @@ def _measurements_with_neighbor_distances(
     pixel_size_x_um: float,
     pixel_size_y_um: float,
 ) -> list[ComponentMeasurement]:
+    """Attach nearest-neighbor distance measurements to component records."""
+
     distances = _mean_nearest_neighbor_distances_um(
         [
             (measurement.centroid_x_px, measurement.centroid_y_px)
@@ -1792,6 +2368,8 @@ def _component_measurement_maps(
     component_labels: np.ndarray,
     measurements: tuple[ComponentMeasurement, ...],
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Expand per-component measurements into per-pixel lookup arrays."""
+
     area_values = np.zeros(int(component_labels.max()) + 1, dtype=np.float32)
     elongation_values = np.zeros_like(area_values)
     mean_3nn_distance_values = np.zeros_like(area_values)
@@ -1812,6 +2390,8 @@ def _component_measurement_maps(
 
 
 def _finite_score(value: float) -> float:
+    """Convert NaN confidence scores to zero for deterministic sorting."""
+
     return float(value) if np.isfinite(value) else 0.0
 
 
@@ -1820,6 +2400,8 @@ def _fill_count_selection_by_confidence(
     candidates: tuple[ComponentMeasurement, ...],
     requested_count: int,
 ) -> tuple[ComponentMeasurement, ...]:
+    """Fill an under-sized selection with highest-confidence remaining objects."""
+
     selected_labels = {measurement.label for measurement in selected}
     remaining = [
         measurement
